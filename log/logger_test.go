@@ -1,9 +1,11 @@
 package log_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +13,27 @@ import (
 	"github.com/bnb-chain/bsc-mev-sentry/log"
 	"github.com/bnb-chain/bsc-mev-sentry/log/internal/types"
 )
+
+// bufWriter is a thread-safe in-memory writer that satisfies types.AsyncWriter.
+type bufWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *bufWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *bufWriter) Sync() error { return nil }
+func (b *bufWriter) Stop() error { return nil }
+
+func (b *bufWriter) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func initTestLogger(lvl types.Level) {
 	log.Init(lvl, "./tmp/test.log")
@@ -111,19 +134,24 @@ func Test_With(t *testing.T) {
 	printLogContent(t)
 }
 
-// Verify that calling Init with an
-// empty path does not create any files or directories.
-// The logger falls back to stderr instead of creating a directory.
+// Verify that calling Init with an empty path does not create any files or
+// directories, and that log output still reaches the configured writer.
 // This behavior lets the process supervisor (e.g. journald) handle log capture.
 func Test_InitWithEmptyPathFallsBackToStderr(t *testing.T) {
+	bw := &bufWriter{}
+	log.SetWriter(bw)
+
 	entriesBefore, err := os.ReadDir(".")
 	assert.NoError(t, err)
 
 	log.Init(types.InfoLevel, "")
 	log.Info("fallback to stderr")
+	log.Stop()
 
 	entriesAfter, err := os.ReadDir(".")
 	assert.NoError(t, err)
 	assert.Equal(t, len(entriesBefore), len(entriesAfter),
 		"Init with empty path must not create any files or directories")
+	assert.Contains(t, bw.String(), "fallback to stderr",
+		"log output must reach the writer when path is empty")
 }
